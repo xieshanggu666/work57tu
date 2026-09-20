@@ -7,6 +7,7 @@ import { useGapStore } from '@/stores/gap'
 import { useAccessStore } from '@/stores/access'
 import { canViewDoc } from '@/utils/permission'
 import { extractKeywords, scoreDoc } from '@/utils/qa'
+import { latestRestoreInfo } from '@/utils/version'
 import { gapStatusLabel } from '@/utils/gap'
 import { stripHtml, highlightText, highlightTitle, extractSnippet } from '@/utils/search'
 import { formatDate } from '@/utils/format'
@@ -127,7 +128,10 @@ watch(() => route.query.q, (v) => { if (v) { question.value = v; ask(v) } }, { i
             <span class="cite-title" v-html="highlightTitle(c.title, extractKeywords(asked))"></span>
           </div>
           <div class="cite-snippet" v-html="highlightText(c.snippet, extractKeywords(asked))"></div>
-          <div class="cite-meta">分类 · {{ kb.catMap[c.categoryId]?.name }} · 更新于 {{ formatDate(c.updatedAt) }}</div>
+          <div class="cite-meta">
+            分类 · {{ kb.catMap[c.categoryId]?.name }} · 更新于 {{ formatDate(c.updatedAt) }}
+            <span v-if="latestRestoreInfo(c)" class="cite-restore" title="该文档当前内容来自版本恢复">↩ 已恢复至 v{{ latestRestoreInfo(c).fromVersion }}</span>
+          </div>
         </div>
       </div>
 
@@ -200,7 +204,8 @@ watch(() => route.query.q, (v) => { if (v) { question.value = v; ask(v) } }, { i
 .cite-score { background: var(--primary-weak); color: var(--primary); font-size: 11px; padding: 1px 8px; border-radius: 999px; }
 .cite-title { font-weight: 700; }
 .cite-snippet { color: var(--text-2); font-size: 13px; margin: 6px 0; }
-.cite-meta { color: var(--text-3); font-size: 12px; }
+.cite-meta { color: var(--text-3); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cite-restore { font-size: 11px; padding: 0 8px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-weight: 600; }
 .related { display: flex; flex-direction: column; gap: 6px; }
 .rel { display: flex; justify-content: space-between; padding: 9px 12px; border-radius: 8px; cursor: pointer; background: var(--panel-2); }
 .rel:hover { background: var(--primary-weak); }

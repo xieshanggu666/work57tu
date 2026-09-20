@@ -7,8 +7,9 @@ import MemberSelect from '@/components/common/MemberSelect.vue'
 import { formatDate, formatFull, avatarColor } from '@/utils/format'
 import {
   REVIEW, reviewStatusLabel, canWithdrawReview, canReviewDecision,
-  canCommentReview, timelineActionLabel
+  canCommentReview, timelineActionLabel, isRestoreReview
 } from '@/utils/review'
+import { diffBodyLines, versionRangeText } from '@/utils/version'
 
 const props = defineProps({
   doc: { type: Object, required: true }
@@ -24,6 +25,8 @@ const noteText = ref('')
 const decisionOpen = ref(false)
 const busy = ref(false)
 const justDecided = ref('')
+// 恢复评审的正文差异展开状态
+const restoreDiffOpen = ref(false)
 
 // 展开的历史评审单 id（最新一条默认展开）
 const expanded = ref({})
@@ -38,6 +41,22 @@ const pendingComments = computed(() =>
   pending.value ? reviewStore.commentsOfReview(pending.value.id) : []
 )
 const userById = computed(() => Object.fromEntries(auth.users.map((u) => [u.id, u])))
+
+// 恢复评审：恢复来源与回滚预览（含评审期间的并发修改）
+const restoreFrom = computed(() => (isRestoreReview(pending.value) ? pending.value.restoreFrom : null))
+const rollbackPreview = computed(() => {
+  if (!restoreFrom.value || !props.doc?.versions?.length) return null
+  const fromV = restoreFrom.value.version
+  const currentV = props.doc.versions.length
+  const rolledBack = []
+  for (let v = fromV + 1; v <= currentV; v++) rolledBack.push(v)
+  const concurrent = rolledBack.filter((v) => v > pending.value.baseVersion)
+  return { fromV, rolledBack, concurrent }
+})
+// 恢复后的内容变化（当前 → 恢复快照）：绿=恢复的内容，红=将移除的内容
+const restoreDiffLines = computed(() =>
+  restoreFrom.value && props.doc ? diffBodyLines(props.doc.body, pending.value.snapshot?.body || '') : []
+)
 
 // 待审批快照与当前文档的字段差异（提示审批通过后将发生的变化）
 const diffs = computed(() => {
@@ -132,10 +151,31 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
     <div v-if="pending" class="rv-body">
       <div class="rv-meta">
         <span class="who"><span class="ava" :style="{ background: avatarColor(pending.submittedBy) }">{{ userById[pending.submittedBy]?.avatar || '?' }}</span>
-          {{ userById[pending.submittedBy]?.name || pending.submittedBy }} 发起评审
+          {{ userById[pending.submittedBy]?.name || pending.submittedBy }} {{ restoreFrom ? '发起恢复评审' : '发起评审' }}
         </span>
         <span class="tm">{{ formatFull(pending.submittedAt) }}</span>
         <span class="ver">基于 v{{ pending.baseVersion }}</span>
+        <span v-if="restoreFrom" class="restore-tag">↩ 恢复至 v{{ restoreFrom.version }}</span>
+      </div>
+
+      <!-- 恢复评审：恢复目标、回滚边界预览与正文差异 -->
+      <div v-if="restoreFrom" class="restore-info">
+        <div class="ri-line">
+          恢复目标：v{{ restoreFrom.version }}（{{ userById[restoreFrom.savedBy]?.name || restoreFrom.savedBy }} 于 {{ formatFull(restoreFrom.savedAt) }} 保存的版本）
+        </div>
+        <div v-if="rollbackPreview && rollbackPreview.rolledBack.length" class="ri-line">
+          通过后将回滚 {{ versionRangeText(rollbackPreview.rolledBack) }}（共 {{ rollbackPreview.rolledBack.length }} 个版本），这些版本保留历史并标记为「被恢复覆盖」。
+          <span v-if="rollbackPreview.concurrent.length" class="concurrent-warn">
+            ⚠️ 其中 {{ versionRangeText(rollbackPreview.concurrent) }} 是评审提交后的并发修改，恢复将一并回滚。
+          </span>
+        </div>
+        <button class="btn sm ghost" @click="restoreDiffOpen = !restoreDiffOpen">{{ restoreDiffOpen ? '收起正文差异' : '查看正文差异' }}</button>
+        <div v-if="restoreDiffOpen" class="restore-diff">
+          <div class="rd-legend">恢复后的内容变化（当前 → v{{ restoreFrom.version }}）：绿色为恢复的内容，红色为将移除的内容</div>
+          <div v-for="(line, i) in restoreDiffLines" :key="i" class="dl" :class="'dl-' + line.type">
+            <span class="dl-sign">{{ line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' ' }}</span>{{ line.text }}
+          </div>
+        </div>
       </div>
 
       <div v-if="diffs.length" class="diff-line">
@@ -192,6 +232,7 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
       <div v-if="shownFirst && !pending" class="h-item">
         <div class="h-head" @click="toggle(shownFirst.id)">
           <span class="st sm" :class="statusCls(shownFirst)">{{ reviewStatusLabel(shownFirst.status) }}</span>
+          <span v-if="isRestoreReview(shownFirst)" class="restore-tag sm">↩ 恢复至 v{{ shownFirst.restoreFrom.version }}</span>
           <span class="h-who">{{ userById[shownFirst.submittedBy]?.name }}</span>
           <span class="h-tm">{{ formatDate(shownFirst.submittedAt) }}</span>
           <span class="h-arrow">{{ isExpanded(shownFirst.id) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -208,6 +249,7 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
       <div v-for="r in history" :key="r.id" class="h-item">
         <div class="h-head" @click="toggle(r.id)">
           <span class="st sm" :class="statusCls(r)">{{ reviewStatusLabel(r.status) }}</span>
+          <span v-if="isRestoreReview(r)" class="restore-tag sm">↩ 恢复至 v{{ r.restoreFrom.version }}</span>
           <span class="h-who">{{ userById[r.submittedBy]?.name }}</span>
           <span class="h-tm">{{ formatDate(r.submittedAt) }}</span>
           <span class="h-arrow">{{ isExpanded(r.id) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -241,6 +283,22 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
 .who { display: inline-flex; align-items: center; gap: 6px; }
 .ava { width: 24px; height: 24px; border-radius: 50%; color: #fff; font-size: 11px; display: inline-grid; place-items: center; }
 .tm, .ver { color: var(--text-3); font-size: 12px; }
+.restore-tag { font-size: 11px; padding: 1px 9px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-weight: 600; }
+.restore-tag.sm { font-size: 10px; padding: 0 7px; }
+.restore-info { margin-top: 10px; padding: 10px 14px; border-radius: 8px; background: #eef2ff; border: 1px solid #c7d2fe; }
+.ri-line { font-size: 12.5px; color: #3730a3; margin-bottom: 6px; line-height: 1.6; }
+.concurrent-warn { color: #b45309; font-weight: 600; }
+.restore-info .btn { margin-top: 2px; }
+.restore-diff { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.rd-legend { padding: 6px 12px; font-size: 11px; color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--panel-2); }
+.dl { display: flex; gap: 8px; padding: 4px 12px; font-size: 12.5px; line-height: 1.6; border-bottom: 1px solid #f1f5f9; }
+.dl:last-child { border-bottom: none; }
+.dl-sign { width: 14px; text-align: center; font-weight: 700; flex-shrink: 0; }
+.dl-same { color: var(--text-2); }
+.dl-add { background: #f0fdf4; color: #15803d; }
+.dl-add .dl-sign { color: #16a34a; }
+.dl-del { background: #fef2f2; color: #b91c1c; }
+.dl-del .dl-sign { color: #dc2626; }
 .diff-line { margin-top: 10px; font-size: 13px; color: var(--text-2); background: var(--primary-weak); border-radius: 8px; padding: 8px 12px; }
 .diff-line b { color: var(--primary); margin-right: 2px; }
 .rv-c-title { font-weight: 600; font-size: 13px; margin: 14px 0 8px; }

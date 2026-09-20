@@ -33,6 +33,22 @@ const seedTags = [
 // doc-3 正文提取为常量：缺口工单演示数据（rev-4 评审快照）需引用同一内容
 const doc3Body = '<h2>统一鉴权链路</h2><p>所有请求进入网关后，先校验 <b>Token</b> 再校验 <i>权限点</i>。</p><h3>角色与权限点</h3><ul><li>admin：全部权限</li><li>editor：可新增与编辑</li><li>viewer：只读</li></ul><blockquote>文档级可见性：public / team / private。</blockquote>'
 
+// doc-2 正文提取为常量：版本恢复演示数据（v1 初始 / v2 误删 / v3 恢复）需引用同一内容
+const doc2Body = '<h2>IndexedDB 太繁琐？试试 Dexie</h2><p>Dexie 用关系型 <b>表</b> 与 <i>索引</i> 来封装 IndexedDB，极大简化读写。</p><pre><code>await db.docs.add({ title: "示例", body: "<p>内容</p>" })</code></pre><h3>常用查询</h3><ul><li>按主键：<code>db.docs.get(id)</code></li><li>按索引过滤：<code>db.docs.where("categoryId").equals(id)</code></li><li>计数：<code>db.docs.count()</code></li></ul><blockquote>版本迁移使用 schemaVersion，新增字段时手动迁移即可。</blockquote>'
+// v2 误删版：「常用查询」与「版本迁移」说明被删掉（恢复评审要回滚的就是这次修改）
+const doc2V2Body = '<h2>IndexedDB 太繁琐？试试 Dexie</h2><p>Dexie 用关系型 <b>表</b> 与 <i>索引</i> 来封装 IndexedDB，极大简化读写。</p><pre><code>await db.docs.add({ title: "示例", body: "<p>内容</p>" })</code></pre>'
+
+// 版本记录的内容快照（与 utils/version 的 docSnapshot 结构一致，这里不依赖文档当前字段）
+function snapOf(doc, bodyOverride) {
+  return {
+    title: doc.title,
+    body: bodyOverride !== undefined ? bodyOverride : doc.body,
+    categoryId: doc.categoryId,
+    tagIds: [...(doc.tagIds || [])],
+    visibility: doc.visibility
+  }
+}
+
 const seedDocs = [
   {
     id: 'doc-1', title: '前端工程初始化与目录规范',
@@ -46,7 +62,7 @@ const seedDocs = [
     categoryId: 'c-dev', tagIds: ['t-db', 't-guide'],
     visibility: 'public', ownerId: 'u-chen', editors: ['u-chen'],
     createdAt: ago(15 * d), updatedAt: ago(5 * d),
-    body: '<h2>IndexedDB 太繁琐？试试 Dexie</h2><p>Dexie 用关系型 <b>表</b> 与 <i>索引</i> 来封装 IndexedDB，极大简化读写。</p><pre><code>await db.docs.add({ title: "示例", body: "<p>内容</p>" })</code></pre><h3>常用查询</h3><ul><li>按主键：<code>db.docs.get(id)</code></li><li>按索引过滤：<code>db.docs.where("categoryId").equals(id)</code></li><li>计数：<code>db.docs.count()</code></li></ul><blockquote>版本迁移使用 schemaVersion，新增字段时手动迁移即可。</blockquote>'
+    body: doc2Body
   },
   {
     id: 'doc-3', title: 'API 鉴权与权限模型',
@@ -274,13 +290,14 @@ const seedRatings = [
 // - doc-1 评审中（锁定，正文为发起前旧版）
 // - doc-6 已通过（待审快照已回写，追加 v2 审批通过版本）
 // - doc-8 最近一次被驳回（内容不变，记录驳回结论）
+// 所有版本记录均带内容快照（可比较/可恢复）
 function withReviewFields(doc) {
   if (doc.id === 'doc-1') {
     return {
       ...doc,
       publishState: 'in_review',
       activeReviewId: 'rev-1',
-      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本', snapshot: snapOf(doc) }]
     }
   }
   if (doc.id === 'doc-6') {
@@ -293,8 +310,8 @@ function withReviewFields(doc) {
       activeReviewId: null,
       lastReview: { reviewId: 'rev-2', status: 'approved', by: 'u-admin', at: approvedAt, note: '复盘环节很有必要，通过。', version: 2 },
       versions: [
-        { version: 1, savedAt: ago(8 * 24 * h), savedBy: doc.ownerId, note: '初始版本' },
-        { version: 2, savedAt: approvedAt, savedBy: 'u-chen', note: '评审通过后发布：复盘环节很有必要，通过。', reviewStatus: 'approved', reviewId: 'rev-2', decidedBy: 'u-admin' }
+        { version: 1, savedAt: ago(8 * 24 * h), savedBy: doc.ownerId, note: '初始版本', snapshot: snapOf(doc) },
+        { version: 2, savedAt: approvedAt, savedBy: 'u-chen', note: '评审通过后发布：复盘环节很有必要，通过。', reviewStatus: 'approved', reviewId: 'rev-2', decidedBy: 'u-admin', snapshot: snapOf(doc, doc6ApprovedBody) }
       ]
     }
   }
@@ -305,20 +322,55 @@ function withReviewFields(doc) {
       publishState: 'published',
       activeReviewId: null,
       lastReview: { reviewId: 'rev-3', status: 'rejected', by: 'u-admin', at: rejectedAt, note: '可见性从团队改为私有范围过大，且强制改密周期需与运维确认，暂不通过。' },
-      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本', snapshot: snapOf(doc) }]
     }
   }
   return {
     ...doc,
     publishState: 'published',
     activeReviewId: null,
-    versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+    versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本', snapshot: snapOf(doc) }]
   }
 }
 
+// ---- 版本恢复演示数据（doc-2）----
+// v1 初始 → v2 误删「常用查询/版本迁移」→ 王子薇发起恢复评审（rev-5）→ 管理员通过生成 v3（恢复自 v1）
+// v2 被标记为「已被 v3 恢复覆盖」，演示恢复边界；doc-2 当前内容 = v1 内容
+const doc2Snap = (body) => ({ title: 'Dexie 数据库操作指南', body, categoryId: 'c-dev', tagIds: ['t-db', 't-guide'], visibility: 'public' })
+
+function doc2RestoreVersions() {
+  const restoredAt = ago(1 * d)
+  return [
+    { version: 1, savedAt: ago(15 * d), savedBy: 'u-chen', note: '初始版本', snapshot: doc2Snap(doc2Body) },
+    { version: 2, savedAt: ago(3 * d), savedBy: 'u-chen', note: '编辑文档', snapshot: doc2Snap(doc2V2Body), supersededBy: { version: 3, at: restoredAt } },
+    {
+      version: 3, savedAt: restoredAt, savedBy: 'u-ziwei',
+      note: '恢复至 v1：确认误删，恢复。',
+      reviewStatus: 'approved', reviewId: 'rev-5', decidedBy: 'u-admin',
+      restore: { fromVersion: 1, rolledBack: [2], rolledBackConcurrent: [], reviewId: 'rev-5', decidedBy: 'u-admin' },
+      snapshot: doc2Snap(doc2Body)
+    }
+  ]
+}
+
+const seedReview5 = {
+  id: 'rev-5', docId: 'doc-2', status: 'approved',
+  submittedBy: 'u-ziwei', submittedAt: ago(2 * d),
+  snapshot: doc2Snap(doc2Body),
+  baseVersion: 2,
+  restoreFrom: { version: 1, savedAt: ago(15 * d), savedBy: 'u-chen' },
+  decidedBy: 'u-admin', decidedAt: ago(1 * d), decisionNote: '确认误删，恢复。',
+  restoreResult: { rolledBack: [2], rolledBackConcurrent: [] },
+  timeline: [
+    { action: 'restore-submit', by: 'u-ziwei', at: ago(2 * d), note: 'v2 误删了常用查询与版本迁移说明，申请恢复至 v1。' },
+    { action: 'approve', by: 'u-admin', at: ago(1 * d), note: '确认误删，恢复。' }
+  ]
+}
+
 // 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）；
-// v3 文档访问申请演示数据（doc-9 保密文档上的限时阅读/协作授权、撤销与到期留痕）
-const SEED_VER = '3'
+// v3 文档访问申请演示数据（doc-9 保密文档上的限时阅读/协作授权、撤销与到期留痕）；
+// v4 版本快照回填与 doc-2 恢复演示（v2 误删 + rev-5 恢复评审通过 + v3 恢复边界标记）
+const SEED_VER = '4'
 
 async function isSeeded() {
   return (await getMeta('seeded')) === SEED_VER
@@ -337,12 +389,12 @@ async function ensureGapSeed() {
     const decidedAt = ago(1 * d)
     const versions = doc3.versions?.length
       ? doc3.versions
-      : [{ version: 1, savedAt: doc3.createdAt, savedBy: doc3.ownerId, note: '初始版本' }]
+      : [{ version: 1, savedAt: doc3.createdAt, savedBy: doc3.ownerId, note: '初始版本', snapshot: snapOf(doc3) }]
     await db.docs.put({
       ...doc3,
       updatedAt: decidedAt,
       lastReview: { reviewId: 'rev-4', status: 'approved', by: 'u-admin', at: decidedAt, note: '内容已覆盖权限申请流程，通过。', version: versions.length + 1 },
-      versions: [...versions, { version: versions.length + 1, savedAt: decidedAt, savedBy: 'u-chen', note: '评审通过后发布：内容已覆盖权限申请流程，通过。', reviewStatus: 'approved', reviewId: 'rev-4', decidedBy: 'u-admin' }]
+      versions: [...versions, { version: versions.length + 1, savedAt: decidedAt, savedBy: 'u-chen', note: '评审通过后发布：内容已覆盖权限申请流程，通过。', reviewStatus: 'approved', reviewId: 'rev-4', decidedBy: 'u-admin', snapshot: snapOf(doc3) }]
     })
   }
   await db.gapTickets.bulkAdd(seedGapTickets)
@@ -442,6 +494,35 @@ async function ensureAccessSeed() {
   await db.accessRequests.bulkAdd(seedAccessRequests)
 }
 
+// ---- 版本快照与恢复演示（v4 增量种子）----
+// 1) 回填：所有文档的最新版本补上当前内容快照（最新版本的内容即当前内容，回填总是正确；
+//    更早的历史版本无法重建内容，保留为无快照的元数据记录，界面上标记「无快照」）
+// 2) doc-2 恢复演示：仅在文档保持种子原样（未被用户编辑）时追加 v2 误删 + v3 恢复，
+//    避免在用户已修改的文档上伪造历史
+async function ensureRestoreSeed() {
+  const allDocs = await db.docs.toArray()
+  for (const d of allDocs) {
+    const versions = d.versions || []
+    if (!versions.length) continue
+    const latest = versions[versions.length - 1]
+    if (!latest.snapshot) {
+      const fixed = [...versions]
+      fixed[fixed.length - 1] = { ...latest, snapshot: snapOf(d) }
+      await db.docs.update(d.id, { versions: fixed })
+    }
+  }
+  const doc2 = await db.docs.get('doc-2')
+  if (doc2 && (doc2.versions || []).length === 1 && doc2.body === doc2Body) {
+    const restoredAt = ago(1 * d)
+    await db.docs.update('doc-2', {
+      updatedAt: restoredAt,
+      lastReview: { reviewId: 'rev-5', status: 'approved', by: 'u-admin', at: restoredAt, note: '确认误删，恢复。', version: 3 },
+      versions: doc2RestoreVersions()
+    })
+    if (!(await db.reviews.get('rev-5'))) await db.reviews.add(seedReview5)
+  }
+}
+
 export async function ensureSeeded() {
   if (await isSeeded()) return
   await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, db.accessRequests, async () => {
@@ -458,6 +539,7 @@ export async function ensureSeeded() {
     }
     await ensureGapSeed()
     await ensureAccessSeed()
+    await ensureRestoreSeed()
   })
   await setMeta('seeded', SEED_VER)
 }

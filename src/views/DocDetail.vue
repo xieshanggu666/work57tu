@@ -13,8 +13,9 @@ import ReviewPanel from '@/components/doc/ReviewPanel.vue'
 import AccessApplyCard from '@/components/doc/AccessApplyCard.vue'
 import AccessPanel from '@/components/doc/AccessPanel.vue'
 import { formatFull, formatDate, avatarColor } from '@/utils/format'
-import { canEditDoc, canViewDoc } from '@/utils/permission'
-import { versionReviewBadge } from '@/utils/review'
+import { canEditDoc, canViewDoc, canEditContent } from '@/utils/permission'
+import { versionReviewBadge, versionRestoreBadges } from '@/utils/review'
+import { diffVersionFields, diffBodyLines, docSnapshot, fieldLabels, versionRangeText } from '@/utils/version'
 import { ACCESS, accessPermLabel, grantExpireText } from '@/utils/access'
 
 const route = useRoute()
@@ -39,6 +40,73 @@ const reviewSubmittedNotice = ref('')
 const docId = computed(() => route.params.id)
 // 兼容旧数据：早期文档可能没有 versions 字段
 const versionList = computed(() => (doc.value?.versions?.length ? doc.value.versions : []))
+
+// ---- 版本对比与恢复 ----
+const compareVersion = ref(null) // 对比基准版本号（与当前内容对比）
+const restoreVersion = ref(null) // 待恢复的版本号
+const restoreNote = ref('')
+const restoreBusy = ref(false)
+const restoreDone = ref('')
+
+const latestVersion = computed(() => versionList.value.length)
+const currentSnap = computed(() => (doc.value ? docSnapshot(doc.value) : null))
+const compareTarget = computed(() => versionList.value.find((v) => v.version === compareVersion.value) || null)
+const compareFields = computed(() =>
+  compareTarget.value?.snapshot && doc.value ? diffVersionFields(compareTarget.value.snapshot, currentSnap.value) : []
+)
+// 标准「旧 → 新」差异：红色为旧版本有而当前没有，绿色为当前有而旧版本没有
+const compareLines = computed(() =>
+  compareTarget.value?.snapshot && doc.value ? diffBodyLines(compareTarget.value.snapshot.body, doc.value.body) : []
+)
+const restoreTarget = computed(() => versionList.value.find((v) => v.version === restoreVersion.value) || null)
+// 恢复预览：fromV 之后到当前的所有版本将被回滚并标记边界
+const restorePreview = computed(() => {
+  if (!restoreTarget.value || !doc.value) return null
+  const fromV = restoreTarget.value.version
+  const rolledBack = versionList.value.filter((v) => v.version > fromV).map((v) => v.version)
+  return { fromV, rolledBack }
+})
+// 编辑者/管理员且文档不在评审中时可发起恢复评审
+const canRestore = computed(() => canEditContent(auth.user?.role) && !pendingReview.value)
+
+function isIdentical(v) {
+  if (!v?.snapshot || !doc.value) return false
+  return diffVersionFields(v.snapshot, currentSnap.value).length === 0
+}
+function toggleCompare(v) {
+  if (!v.snapshot) return
+  compareVersion.value = compareVersion.value === v.version ? null : v.version
+  restoreVersion.value = null
+}
+function openRestore(v) {
+  restoreVersion.value = v.version
+  compareVersion.value = v.version // 恢复时同步展开对比，所见即所得
+  restoreNote.value = ''
+}
+async function submitRestore() {
+  if (!restoreTarget.value || restoreBusy.value) return
+  restoreBusy.value = true
+  try {
+    const res = await reviewStore.submitRestoreReview(doc.value.id, restoreTarget.value.version, restoreNote.value.trim(), auth.user)
+    if (res.status === 'ok') {
+      restoreDone.value = '已提交恢复评审：文档进入「评审中」，管理员审批通过后将恢复至 v' + restoreTarget.value.version
+      restoreVersion.value = null
+      restoreNote.value = ''
+      await refresh()
+      setTimeout(() => { restoreDone.value = '' }, 5000)
+    } else if (res.status === 'duplicate') {
+      alert('该文档已有流转中的评审单，请等待审批后再发起恢复。')
+    } else if (res.status === 'identical') {
+      alert('该版本与当前内容一致，无需恢复。')
+    } else if (res.status === 'no-snapshot') {
+      alert('该版本没有内容快照，无法恢复。')
+    } else {
+      alert('恢复评审提交失败，请重试。')
+    }
+  } finally {
+    restoreBusy.value = false
+  }
+}
 
 async function refresh() {
   if (!docId.value) return
@@ -142,12 +210,58 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
       </div>
 
       <div v-if="showVersions" class="card versions">
-        <div v-for="v in [...versionList].reverse()" :key="v.version" class="ver">
+        <div class="ver-head">
+          <span class="ver-title">版本记录（{{ versionList.length }}）</span>
+          <span class="ver-hint">点击「对比」查看与当前内容的差异；编辑者可对历史版本发起恢复评审</span>
+        </div>
+        <div v-if="restoreDone" class="restore-done">✅ {{ restoreDone }}</div>
+        <div v-for="v in [...versionList].reverse()" :key="v.version" class="ver" :class="{ superseded: v.supersededBy }">
           <span class="vnum">v{{ v.version }}</span>
-          <span class="vnote">{{ v.note || '编辑' }}</span>
-          <span v-if="versionReviewBadge(v)" class="vbadge" :class="'vb-' + versionReviewBadge(v).cls">{{ versionReviewBadge(v).text }}</span>
+          <div class="vmain">
+            <span class="vnote">{{ v.note || '编辑' }}</span>
+            <span v-if="versionReviewBadge(v)" class="vbadge" :class="'vb-' + versionReviewBadge(v).cls">{{ versionReviewBadge(v).text }}</span>
+            <span v-for="b in versionRestoreBadges(v)" :key="b.text" class="vbadge" :class="'vb-' + b.cls">{{ b.text }}</span>
+            <span v-if="!v.snapshot" class="vnosnap" title="旧版本记录未保存内容快照，无法对比或恢复">无快照</span>
+          </div>
           <span class="vwho">{{ userById[v.savedBy]?.name || v.savedBy }}</span>
           <span class="vtime">{{ formatFull(v.savedAt) }}</span>
+          <div class="vacts">
+            <button v-if="v.snapshot" class="btn sm ghost" @click="toggleCompare(v)">{{ compareVersion === v.version ? '收起' : '对比' }}</button>
+            <button v-if="canRestore && v.snapshot && !isIdentical(v)" class="btn sm" @click="openRestore(v)">恢复</button>
+            <span v-else-if="v.snapshot && isIdentical(v)" class="vcur">当前内容</span>
+          </div>
+        </div>
+
+        <!-- 对比面板：选中版本（旧）与当前内容（新）的字段与正文差异 -->
+        <div v-if="compareTarget?.snapshot" class="diff-panel">
+          <div class="diff-head">
+            v{{ compareTarget.version }}（{{ formatFull(compareTarget.savedAt) }}）与当前内容（v{{ latestVersion }}）的差异
+          </div>
+          <div class="diff-fields">
+            <template v-if="compareFields.length">字段差异：<b>{{ fieldLabels(compareFields).join('、') }}</b></template>
+            <template v-else>两个版本内容一致</template>
+          </div>
+          <div v-if="compareFields.includes('body')" class="diff-body">
+            <div class="diff-legend">红色：v{{ compareTarget.version }} 有而当前没有；绿色：当前有而 v{{ compareTarget.version }} 没有</div>
+            <div v-for="(line, i) in compareLines" :key="i" class="dl" :class="'dl-' + line.type">
+              <span class="dl-sign">{{ line.type === 'add' ? '+' : line.type === 'del' ? '−' : ' ' }}</span>{{ line.text }}
+            </div>
+          </div>
+
+          <!-- 恢复确认：提交恢复评审，通过后生成新版本并重标旧记录边界 -->
+          <div v-if="restoreTarget && restoreTarget.version === compareTarget.version" class="restore-form">
+            <div class="rf-title">↩ 恢复至 v{{ restoreTarget.version }}</div>
+            <div class="rf-desc" v-if="restorePreview">
+              审批通过后将生成新版本 v{{ latestVersion + 1 }}（内容为 v{{ restoreTarget.version }} 的快照）；
+              {{ versionRangeText(restorePreview.rolledBack) }} 共 {{ restorePreview.rolledBack.length }} 个版本将被标记为「被恢复覆盖」，
+              历史记录保留不删除，问答引用同步指向恢复后的内容。
+            </div>
+            <textarea v-model="restoreNote" rows="2" placeholder="恢复说明（可选，将作为评审意见留痕）"></textarea>
+            <div class="rf-acts">
+              <button class="btn sm primary" :disabled="restoreBusy" @click="submitRestore">{{ restoreBusy ? '提交中…' : '提交恢复评审' }}</button>
+              <button class="btn sm ghost" @click="restoreVersion = null">取消</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -200,13 +314,49 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 .meta-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; color: var(--text-3); font-size: 12px; }
 .pills { margin-right: 8px; }
 .who { color: var(--text-3); }
-.versions { margin-top: 14px; padding: 12px 20px; }
-.ver { display: flex; gap: 14px; padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
-.ver:last-child { border-bottom: none; }
-.vnum { font-weight: 700; color: var(--primary); min-width: 40px; }
-.vnote { flex: 1; }
-.vwho { color: var(--text-2); }
-.vtime { color: var(--text-3); }
+.versions { margin-top: 14px; padding: 12px 20px 16px; }
+.ver-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 4px 0 10px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.ver-title { font-weight: 700; font-size: 14px; }
+.ver-hint { color: var(--text-3); font-size: 12px; }
+.restore-done { margin: 8px 0; padding: 8px 14px; border-radius: 8px; font-size: 13px; color: #15803d; background: #f0fdf4; border: 1px solid #bbf7d0; }
+.ver { display: flex; gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
+.ver:last-of-type { border-bottom: none; }
+.ver.superseded { opacity: 0.62; }
+.vnum { font-weight: 700; color: var(--primary); min-width: 36px; }
+.ver.superseded .vnum { color: var(--text-3); }
+.vmain { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.vnote { color: var(--text); }
+.vwho { color: var(--text-2); white-space: nowrap; }
+.vtime { color: var(--text-3); white-space: nowrap; }
+.vacts { display: flex; gap: 6px; align-items: center; }
+.vcur { font-size: 11px; color: var(--text-3); padding: 1px 8px; border-radius: 999px; background: var(--panel-2); }
+.vnosnap { font-size: 11px; color: var(--text-3); padding: 1px 8px; border-radius: 999px; border: 1px dashed var(--border); }
+.vb-restore { background: #e0e7ff; color: #4338ca; }
+.vb-superseded { background: var(--panel-2); color: var(--text-3); }
+
+/* 对比面板 */
+.diff-panel { margin-top: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; background: var(--panel-2); }
+.diff-head { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.diff-fields { font-size: 13px; color: var(--text-2); margin-bottom: 8px; }
+.diff-fields b { color: var(--primary); }
+.diff-body { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--panel); }
+.diff-legend { padding: 6px 12px; font-size: 11px; color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--panel-2); }
+.dl { display: flex; gap: 8px; padding: 4px 12px; font-size: 12.5px; line-height: 1.6; border-bottom: 1px solid #f1f5f9; }
+.dl:last-child { border-bottom: none; }
+.dl-sign { width: 14px; text-align: center; font-weight: 700; flex-shrink: 0; }
+.dl-same { color: var(--text-2); }
+.dl-add { background: #f0fdf4; color: #15803d; }
+.dl-add .dl-sign { color: #16a34a; }
+.dl-del { background: #fef2f2; color: #b91c1c; }
+.dl-del .dl-sign { color: #dc2626; }
+
+/* 恢复确认 */
+.restore-form { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 12px; }
+.rf-title { font-weight: 700; font-size: 14px; color: #4338ca; margin-bottom: 6px; }
+.rf-desc { font-size: 12.5px; color: var(--text-2); margin-bottom: 10px; line-height: 1.6; }
+.restore-form textarea { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; resize: vertical; outline: none; }
+.restore-form textarea:focus { border-color: var(--primary); }
+.rf-acts { display: flex; gap: 8px; margin-top: 8px; }
 
 .render { padding: 28px 32px; margin-top: 14px; line-height: 1.8; }
 .render :deep(h1) { font-size: 26px; margin: 14px 0 8px; }

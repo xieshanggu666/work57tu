@@ -20,6 +20,11 @@ export function isReviewOpen(review) {
   return !!review && review.status === REVIEW.PENDING
 }
 
+// 评审单是否为版本恢复评审（snapshot 为历史版本快照，restoreFrom 标记恢复来源）
+export function isRestoreReview(review) {
+  return !!review?.restoreFrom
+}
+
 // 文档是否处于评审中（存在待审批评审单时锁定正文）
 export function isDocInReview(doc, pendingReview) {
   if (!doc) return false
@@ -72,6 +77,16 @@ export function versionReviewBadge(v) {
   return null
 }
 
+// 版本记录上的恢复标记（可能同时存在）：
+// - restore：该版本是一次恢复（恢复自 vN）
+// - supersededBy：该版本的修改已被 vN 的恢复回滚（恢复边界之外的旧记录）
+export function versionRestoreBadges(v) {
+  const out = []
+  if (v?.restore) out.push({ text: '恢复自 v' + v.restore.fromVersion, cls: 'restore' })
+  if (v?.supersededBy) out.push({ text: '已被 v' + v.supersededBy.version + ' 恢复覆盖', cls: 'superseded' })
+  return out
+}
+
 // 生成一条审批留痕（意见 + 操作人 + 时间），评审单的 timeline 全程保留
 export function buildTimelineEntry(action, userId, note, now = new Date().toISOString()) {
   return { action, by: userId, note: note || '', at: now }
@@ -80,6 +95,7 @@ export function buildTimelineEntry(action, userId, note, now = new Date().toISOS
 export function timelineActionLabel(action) {
   return {
     submit: '发起评审',
+    'restore-submit': '发起恢复评审',
     comment: '发表评审意见',
     approve: '审批通过',
     reject: '审批驳回',

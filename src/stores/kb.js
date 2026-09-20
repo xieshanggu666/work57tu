@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { db } from '@/db'
 import { uid } from '@/utils/format'
-import { ensureVersions, mergeDocFields } from '@/utils/version'
+import { ensureVersions, mergeDocFields, docSnapshot } from '@/utils/version'
 import { buildTimelineEntry } from '@/utils/review'
 import { GAP } from '@/utils/gap'
 import { isGrantActive, ACCESS_PERM } from '@/utils/access'
@@ -61,7 +61,7 @@ export const useKbStore = defineStore('kb', () => {
       editors: [currentUser?.id || 'u-guest'],
       createdAt: now,
       updatedAt: now,
-      versions: [{ version: 1, savedAt: now, savedBy: currentUser?.id || 'u-guest', note: '创建文档' }]
+      versions: [{ version: 1, savedAt: now, savedBy: currentUser?.id || 'u-guest', note: '创建文档', snapshot: docSnapshot(payload) }]
     }
     await db.docs.add(doc)
     await reloadDocs()
@@ -132,7 +132,8 @@ export const useKbStore = defineStore('kb', () => {
         ...existing,
         ...fields,
         updatedAt: now,
-        versions: [...versions, { version: currentVersion + 1, savedAt: now, savedBy, note: versionNote }]
+        // 版本记录升级为内容快照：保存后的完整字段随版本留档，供历史对比与恢复评审使用
+        versions: [...versions, { version: currentVersion + 1, savedAt: now, savedBy, note: versionNote, snapshot: docSnapshot({ ...existing, ...fields }) }]
       }
       await db.docs.put(updated)
       result = { status: 'saved', doc: updated, autoMerged }
