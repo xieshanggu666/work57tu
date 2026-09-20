@@ -145,6 +145,7 @@ watch(() => route.query.q, (v) => { if (v) { question.value = v; ask(v) } }, { i
           <div class="block-title">💡 以下补写文档可能回答了该问题</div>
           <div v-for="t in resolvedSources" :key="t.id" class="gap-src" @click="docById[t.docId] && router.push('/docs/' + t.docId)">
             <span class="gap-src-title">《{{ docById[t.docId]?.title || '文档已删除' }}》</span>
+            <span v-if="t.sourceVersion" class="gap-src-ver">引用版本 v{{ t.sourceVersion }}</span>
             <span class="gap-src-q">来自缺口工单：{{ t.question }}</span>
           </div>
         </template>
@@ -210,6 +211,7 @@ watch(() => route.query.q, (v) => { if (v) { question.value = v; ask(v) } }, { i
 .gap-src { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 9px 12px; border-radius: 8px; cursor: pointer; background: #f0fdf4; border: 1px solid #bbf7d0; margin-bottom: 6px; }
 .gap-src:hover { border-color: #16a34a; }
 .gap-src-title { color: #15803d; font-weight: 600; }
+.gap-src-ver { font-size: 11px; color: #6d28d9; background: #ede9fe; border-radius: 999px; padding: 1px 8px; }
 .gap-src-q { color: var(--text-3); font-size: 12px; }
 .gap-exists { font-size: 13px; color: var(--text-2); background: var(--primary-weak); border-radius: 8px; padding: 10px 14px; }
 .gap-exists a { cursor: pointer; }

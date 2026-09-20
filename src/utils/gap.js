@@ -106,6 +106,7 @@ export function gapTimelineLabel(action) {
     dissolve: '解散合并组',
     submit: '关联文档送审',
     resolve: '审批通过 · 回填答案来源',
+    'resync-source': '答案来源随版本恢复更新',
     return: '退回处理',
     reset: '关联文档已删除'
   }[action] || action

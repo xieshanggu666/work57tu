@@ -10,11 +10,11 @@ import DocPill from '@/components/common/DocPill.vue'
 import MemberSelect from '@/components/common/MemberSelect.vue'
 import ShareDialog from '@/components/doc/ShareDialog.vue'
 import ReviewPanel from '@/components/doc/ReviewPanel.vue'
+import VersionHistory from '@/components/doc/VersionHistory.vue'
 import AccessApplyCard from '@/components/doc/AccessApplyCard.vue'
 import AccessPanel from '@/components/doc/AccessPanel.vue'
 import { formatFull, formatDate, avatarColor } from '@/utils/format'
 import { canEditDoc, canViewDoc } from '@/utils/permission'
-import { versionReviewBadge } from '@/utils/review'
 import { ACCESS, accessPermLabel, grantExpireText } from '@/utils/access'
 
 const route = useRoute()
@@ -141,14 +141,8 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
         </div>
       </div>
 
-      <div v-if="showVersions" class="card versions">
-        <div v-for="v in [...versionList].reverse()" :key="v.version" class="ver">
-          <span class="vnum">v{{ v.version }}</span>
-          <span class="vnote">{{ v.note || '编辑' }}</span>
-          <span v-if="versionReviewBadge(v)" class="vbadge" :class="'vb-' + versionReviewBadge(v).cls">{{ versionReviewBadge(v).text }}</span>
-          <span class="vwho">{{ userById[v.savedBy]?.name || v.savedBy }}</span>
-          <span class="vtime">{{ formatFull(v.savedAt) }}</span>
-        </div>
+      <div v-if="showVersions" class="card">
+        <VersionHistory :doc="doc" :pending-review="pendingReview" />
       </div>
 
       <article class="render card" v-html="doc.body"></article>

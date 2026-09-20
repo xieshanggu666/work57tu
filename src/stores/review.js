@@ -2,8 +2,9 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { db } from '@/db'
 import { uid } from '@/utils/format'
-import { ensureVersions } from '@/utils/version'
-import { REVIEW, PUBLISH, buildTimelineEntry } from '@/utils/review'
+import { ensureVersions, snapshotOf, diffSnapshots, mergeDocFields, withRestoreBoundary } from '@/utils/version'
+import { REVIEW, REVIEW_KIND, PUBLISH, buildTimelineEntry } from '@/utils/review'
+import { canEditContent } from '@/utils/permission'
 import { GAP } from '@/utils/gap'
 import { useKbStore } from './kb'
 import { useGapStore } from './gap'
@@ -58,10 +59,15 @@ export const useReviewStore = defineStore('review', () => {
   }
 
   // 构造待审批评审单：snapshot 为本次提交待审批的字段快照，审批通过时据此回写，保证「先审后发」
-  function buildReviewRecord(docId, patch, note, userId, now, baseVersion) {
+  // baseSnapshot：发起评审时文档的内容快照，审批时用于检测评审期间的并发修改并做三方合并
+  // kind=restore 时为版本恢复评审：restoreFromVersion 标记要回放的历史版本（恢复边界来源）
+  function buildReviewRecord(docId, patch, note, userId, now, baseVersion, opts = {}) {
+    const kind = opts.kind || REVIEW_KIND.EDIT
     return {
       id: uid('rev'),
       docId,
+      kind,
+      restoreFromVersion: kind === REVIEW_KIND.RESTORE ? opts.restoreFromVersion : null,
       status: REVIEW.PENDING,
       submittedBy: userId,
       submittedAt: now,
@@ -73,14 +79,21 @@ export const useReviewStore = defineStore('review', () => {
         visibility: patch.visibility
       },
       baseVersion,
+      // 发起时的文档内容快照：审批通过时据此识别评审期间他人的直接保存，避免恢复/发布覆盖并发修改
+      baseSnapshot: opts.baseSnapshot ? snapshotOf(opts.baseSnapshot) : null,
       decidedBy: null,
       decidedAt: null,
       decisionNote: '',
-      timeline: [buildTimelineEntry('submit', userId, note, now)]
+      timeline: [buildTimelineEntry(
+        kind === REVIEW_KIND.RESTORE ? 'submit-restore' : 'submit',
+        userId,
+        note || (kind === REVIEW_KIND.RESTORE ? '申请恢复到 v' + opts.restoreFromVersion : ''),
+        now
+      )]
     }
   }
 
-  // 发起评审。
+  // 发起内容修改评审。
   // patch：本次提交待审批的文档字段（title/body/categoryId/tagIds/visibility）
   // 文档在审批期间保持旧内容可见，但置为「评审中」并锁定编辑；审批通过后才回写
   async function submitReview(docId, patch, note, currentUser) {
@@ -99,7 +112,9 @@ export const useReviewStore = defineStore('review', () => {
         .filter((r) => r.status === REVIEW.PENDING).first()
       if (existingPending) { result = { status: 'duplicate', review: existingPending }; return }
 
-      const review = buildReviewRecord(docId, patch, note, userId, now, ensureVersions(doc, now).length)
+      const review = buildReviewRecord(docId, patch, note, userId, now, ensureVersions(doc, now).length, {
+        baseSnapshot: snapshotOf(doc)
+      })
       await db.reviews.add(review)
 
       // 文档进入评审中：正文锁定，旧内容继续可见，待审批内容不提前泄露
@@ -113,6 +128,55 @@ export const useReviewStore = defineStore('review', () => {
         await db.comments.add(cmt)
         kb.comments.push(cmt)
       }
+      result = { status: 'ok', review }
+    })
+
+    await Promise.all([reload(), kb.reloadDocs()])
+    return result
+  }
+
+  // 发起版本恢复评审：编辑者选择某个带内容快照的历史版本，申请将其内容恢复为新版本。
+  // 恢复不是回滚——审批通过后是「追加」一个内容等于历史快照的新版本，版本链不丢失；
+  // 旧版本记录会被打上恢复去向（恢复边界），评审期间同样锁定文档、并发修改在审批时检测。
+  // 返回状态：ok / duplicate / missing / no-snapshot（历史版本无快照不可恢复）/ denied
+  async function submitRestoreReview(docId, fromVersion, note, currentUser) {
+    const kb = useKbStore()
+    await kb.loadAll()
+    await loadAll()
+    const now = new Date().toISOString()
+    const userId = currentUser?.id || 'u-guest'
+    let result = { status: 'error' }
+
+    if (!canEditContent(currentUser?.role)) return { status: 'denied' }
+
+    await db.transaction('rw', db.docs, db.reviews, db.comments, async () => {
+      const doc = await db.docs.get(docId)
+      if (!doc) { result = { status: 'missing' }; return }
+      const versions = ensureVersions(doc, now)
+      const target = versions.find((v) => v.version === fromVersion)
+      if (!target || !target.snapshot || target.version >= versions.length) {
+        result = { status: 'no-snapshot' }; return
+      }
+      const existingPending = await db.reviews
+        .where('docId').equals(docId)
+        .filter((r) => r.status === REVIEW.PENDING).first()
+      if (existingPending) { result = { status: 'duplicate', review: existingPending }; return }
+
+      const restoreNote = (note || '').trim() || ('申请将文档恢复到历史版本 v' + fromVersion + ' 的内容')
+      const review = buildReviewRecord(docId, target.snapshot, restoreNote, userId, now, versions.length, {
+        kind: REVIEW_KIND.RESTORE,
+        restoreFromVersion: fromVersion,
+        baseSnapshot: snapshotOf(doc)
+      })
+      await db.reviews.add(review)
+      await db.docs.update(docId, { publishState: PUBLISH.IN_REVIEW, activeReviewId: review.id })
+
+      const cmt = {
+        id: uid('cmt'), docId, reviewId: review.id, authorId: userId,
+        content: restoreNote, mentionIds: [], createdAt: now
+      }
+      await db.comments.add(cmt)
+      kb.comments.push(cmt)
       result = { status: 'ok', review }
     })
 
@@ -162,7 +226,9 @@ export const useReviewStore = defineStore('review', () => {
           .filter((r) => r.status === REVIEW.PENDING).first()
         if (existingPending) { result = { status: 'duplicate', review: existingPending }; return }
 
-        const review = buildReviewRecord(docId, patch, note, userId, now, ensureVersions(doc, now).length)
+        const review = buildReviewRecord(docId, patch, note, userId, now, ensureVersions(doc, now).length, {
+          baseSnapshot: snapshotOf(doc)
+        })
         await db.reviews.add(review)
 
         // 文档进入评审中：正文锁定，旧内容继续可见，待审批内容不提前泄露
@@ -234,10 +300,10 @@ export const useReviewStore = defineStore('review', () => {
     return created
   }
 
-  // 联动缺口工单：审批通过 → 已解决并回填答案来源；驳回/撤回 → 退回处理中。
+  // 联动缺口工单：审批通过 → 已解决并回填答案来源（含发布版本号）；驳回/撤回 → 退回处理中。
   // 合并组共用同一 reviewId：所有成员一起解决或一起退回，组关系始终保留。
   // 须在评审决策的同一事务内调用（tables 需包含 db.gapTickets），保证两边状态一致
-  async function syncGapTicket(reviewId, action, note, userId, now) {
+  async function syncGapTicket(reviewId, action, note, userId, now, sourceVersion) {
     const linked = await db.gapTickets.where('reviewId').equals(reviewId).toArray()
     // 仅联动「送审中」的工单：其它状态说明关联已失效（如文档删除后退回、历史脏数据），
     // 不再回写，避免审批结论覆盖已修正的工单状态
@@ -250,6 +316,8 @@ export const useReviewStore = defineStore('review', () => {
         await db.gapTickets.update(ticket.id, {
           status: GAP.RESOLVED,
           resolvedAt: now,
+          // 记录答案来源对应的文档版本；后续版本恢复时据此识别并更新引用
+          sourceVersion: sourceVersion || null,
           timeline: [...(ticket.timeline || []), buildTimelineEntry('resolve', userId, resolveNote, now)]
         })
       } else {
@@ -266,10 +334,38 @@ export const useReviewStore = defineStore('review', () => {
     }
   }
 
+  // 版本恢复审批通过后更新问答引用：
+  // 已解决的缺口工单以本文档为「答案来源」，恢复发布新版本后来源内容随之变化，
+  // 把 sourceVersion 指向新版本并在工单 timeline 留痕，问答页引用始终展示最新来源版本。
+  // 仅更新版本号落后的工单，重复审批/重复恢复不产生重复留痕。须在决策事务内调用。
+  async function resyncGapCitations(docId, nextVersion, userId, now, reviewId) {
+    const resolved = await db.gapTickets
+      .where('docId').equals(docId)
+      .filter((t) => t.status === GAP.RESOLVED && t.sourceVersion !== nextVersion)
+      .toArray()
+    for (const ticket of resolved) {
+      const fromV = ticket.sourceVersion
+      await db.gapTickets.update(ticket.id, {
+        sourceVersion: nextVersion,
+        timeline: [
+          ...(ticket.timeline || []),
+          buildTimelineEntry(
+            'resync-source',
+            userId,
+            '文档恢复发布 v' + nextVersion + (fromV ? '（原引用 v' + fromV + '）' : '') + '，答案来源已更新',
+            now
+          )
+        ]
+      })
+    }
+  }
+
   // 管理员审批：approve 通过 / reject 驳回。
   // 通过：把待审批快照回写到文档（含可见性），追加「审批通过」版本，解除评审中状态；
   // 驳回：文档内容与可见性保持发起前不变，仅解除锁定并留痕。
-  async function decideReview(reviewId, decision, note, currentUser) {
+  // opts.force：评审期间文档被管理员/其他窗口直接保存过（版本漂移）且存在无法自动合并的字段时，
+  // 以待审快照为准覆盖冲突字段；否则返回 drift-conflict 由管理员确认，避免静默覆盖并发修改。
+  async function decideReview(reviewId, decision, note, currentUser, opts = {}) {
     const kb = useKbStore()
     await loadAll()
     const now = new Date().toISOString()
@@ -285,55 +381,122 @@ export const useReviewStore = defineStore('review', () => {
       if (!doc) { result = { status: 'doc-missing' }; return }
 
       const status = decision === 'approve' ? REVIEW.APPROVED : REVIEW.REJECTED
-      const timeline = [
-        ...(review.timeline || []),
-        buildTimelineEntry(status === REVIEW.APPROVED ? 'approve' : 'reject', userId, note, now)
-      ]
-      const decided = {
-        ...review,
-        status,
-        decidedBy: userId,
-        decidedAt: now,
-        decisionNote: note || '',
-        timeline
-      }
+      const isRestore = review.kind === REVIEW_KIND.RESTORE || review.restoreFromVersion != null
 
       if (status === REVIEW.APPROVED) {
-        // 回写审批通过的内容与可见性，并追加带审批标记的新版本（留痕到版本历史）
+        // 并发修改检测：评审期间文档被直接保存过（版本号增长）。
+        // 以发起时快照 baseSnapshot 为基线做三方合并：只改了一方的字段自动合并，双方都改的字段需管理员确认
+        let fields = snapshotOf(review.snapshot)
+        let autoMerged = []
+        let conflictFields = []
         const versions = ensureVersions(doc, now)
+        const drifted = versions.length > (review.baseVersion || versions.length)
+        if (drifted && review.baseSnapshot) {
+          const merge = mergeDocFields(snapshotOf(doc), review.baseSnapshot, fields)
+          autoMerged = merge.autoMerged
+          conflictFields = merge.conflicts
+          fields = merge.fields
+          if (conflictFields.length && !opts.force) {
+            result = {
+              status: 'drift-conflict',
+              review,
+              latest: doc,
+              conflictFields,
+              autoMerged
+            }
+            return
+          }
+          if (opts.force) for (const k of conflictFields) fields[k] = review.snapshot[k]
+        }
+
         const nextVersion = versions.length + 1
+        const approvedSnapshot = snapshotOf({ ...doc, ...fields })
+        const baseNote = isRestore
+          ? '版本恢复：恢复自 v' + review.restoreFromVersion + (note ? '：' + note : '')
+          : '评审通过后发布' + (note ? '：' + note : '')
+        const versionNote = autoMerged.length
+          ? baseNote + '（自动合并：' + autoMerged.join('、') + '）'
+          : baseNote
+
+        let newVersionRecord = {
+          version: nextVersion,
+          savedAt: now,
+          savedBy: review.submittedBy,
+          note: versionNote,
+          reviewStatus: REVIEW.APPROVED,
+          reviewId,
+          decidedBy: userId,
+          snapshot: approvedSnapshot
+        }
+        let nextVersions = [...versions, newVersionRecord]
+        // 恢复边界：被恢复的旧版本记录打上「已恢复为 vX」，新版本记录打上「恢复自 vN」，双向可追溯
+        if (isRestore) {
+          newVersionRecord = {
+            ...newVersionRecord,
+            restoreFrom: review.restoreFromVersion,
+            restoreReviewId: reviewId
+          }
+          nextVersions = withRestoreBoundary(
+            [...versions, newVersionRecord],
+            review.restoreFromVersion, nextVersion, now, reviewId
+          )
+        }
+
         const updated = {
           ...doc,
-          ...review.snapshot,
-          visibility: review.snapshot.visibility,
+          ...fields,
           publishState: PUBLISH.PUBLISHED,
           activeReviewId: null,
           updatedAt: now,
-          lastReview: { reviewId, status, by: userId, at: now, note: note || '', version: nextVersion },
-          versions: [...versions, {
-            version: nextVersion,
-            savedAt: now,
-            savedBy: review.submittedBy,
-            note: '评审通过后发布' + (note ? '：' + note : ''),
-            reviewStatus: REVIEW.APPROVED,
-            reviewId,
-            decidedBy: userId
-          }]
+          lastReview: { reviewId, status, by: userId, at: now, note: note || '', version: nextVersion, kind: review.kind || 'edit' },
+          versions: nextVersions
         }
         await db.docs.put(updated)
+
+        const timeline = [
+          ...(review.timeline || []),
+          buildTimelineEntry(isRestore ? 'approve-restore' : 'approve', userId, note, now)
+        ]
+        await db.reviews.put({
+          ...review,
+          status,
+          decidedBy: userId,
+          decidedAt: now,
+          decisionNote: note || '',
+          publishedVersion: nextVersion,
+          autoMerged,
+          conflictFields,
+          timeline
+        })
+
+        // 缺口工单联动：通过回填答案来源 / 驳回退回处理（同事务，状态不会脱节）
+        await syncGapTicket(reviewId, 'resolve', note, userId, now, nextVersion)
+        // 版本恢复：把本文档作为答案来源的已解决工单引用更新到新版本（问答引用随恢复同步）
+        if (isRestore) await resyncGapCitations(review.docId, nextVersion, userId, now, reviewId)
+        result = { status: 'ok', review: { ...review, status }, approved: true, publishedVersion: nextVersion, restored: isRestore }
       } else {
+        const timeline = [
+          ...(review.timeline || []),
+          buildTimelineEntry('reject', userId, note, now)
+        ]
         // 驳回不改内容，仅解除评审中锁定；驳回结论挂到文档上供详情页提示
         await db.docs.update(review.docId, {
           publishState: PUBLISH.PUBLISHED,
           activeReviewId: null,
-          lastReview: { reviewId, status, by: userId, at: now, note: note || '' }
+          lastReview: { reviewId, status, by: userId, at: now, note: note || '', kind: review.kind || 'edit' }
         })
+        await db.reviews.put({
+          ...review,
+          status,
+          decidedBy: userId,
+          decidedAt: now,
+          decisionNote: note || '',
+          timeline
+        })
+        // 缺口工单联动：驳回退回处理（同事务，状态不会脱节）
+        await syncGapTicket(reviewId, 'return', note, userId, now)
+        result = { status: 'ok', review: { ...review, status }, approved: false }
       }
-
-      await db.reviews.put(decided)
-      // 缺口工单联动：通过回填答案来源 / 驳回退回处理（同事务，状态不会脱节）
-      await syncGapTicket(reviewId, status === REVIEW.APPROVED ? 'resolve' : 'return', note, userId, now)
-      result = { status: 'ok', review: decided, approved: status === REVIEW.APPROVED }
     })
 
     const gap = useGapStore()
@@ -382,7 +545,7 @@ export const useReviewStore = defineStore('review', () => {
   return {
     reviews, loaded, loadAll, reload,
     pendingByDoc, pendingReviewOf, reviewsOfDoc, commentsOfReview,
-    submitReview, submitGapReview, addReviewComment, decideReview, withdrawReview,
+    submitReview, submitRestoreReview, submitGapReview, addReviewComment, decideReview, withdrawReview,
     deleteReviewsOfDoc, pendingCount
   }
 })

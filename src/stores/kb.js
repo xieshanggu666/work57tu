@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { db } from '@/db'
 import { uid } from '@/utils/format'
-import { ensureVersions, mergeDocFields } from '@/utils/version'
+import { ensureVersions, mergeDocFields, snapshotOf } from '@/utils/version'
 import { buildTimelineEntry } from '@/utils/review'
 import { GAP } from '@/utils/gap'
 import { isGrantActive, ACCESS_PERM } from '@/utils/access'
@@ -48,6 +48,7 @@ export const useKbStore = defineStore('kb', () => {
   async function createDoc(payload, currentUser) {
     await loadAll()
     const now = new Date().toISOString()
+    const ownerId = currentUser?.id || 'u-guest'
     const doc = {
       id: uid('doc'),
       title: payload.title || '无标题文档',
@@ -57,11 +58,23 @@ export const useKbStore = defineStore('kb', () => {
       visibility: payload.visibility || 'public',
       publishState: 'published',
       activeReviewId: null,
-      ownerId: currentUser?.id || 'u-guest',
-      editors: [currentUser?.id || 'u-guest'],
+      ownerId,
+      editors: [ownerId],
       createdAt: now,
       updatedAt: now,
-      versions: [{ version: 1, savedAt: now, savedBy: currentUser?.id || 'u-guest', note: '创建文档' }]
+      versions: [{
+        version: 1,
+        savedAt: now,
+        savedBy: ownerId,
+        note: '创建文档',
+        snapshot: snapshotOf({
+          title: payload.title || '无标题文档',
+          body: payload.body || '',
+          categoryId: payload.categoryId || categories.value[0]?.id || null,
+          tagIds: payload.tagIds || [],
+          visibility: payload.visibility || 'public'
+        })
+      }]
     }
     await db.docs.add(doc)
     await reloadDocs()
@@ -132,7 +145,14 @@ export const useKbStore = defineStore('kb', () => {
         ...existing,
         ...fields,
         updatedAt: now,
-        versions: [...versions, { version: currentVersion + 1, savedAt: now, savedBy, note: versionNote }]
+        versions: [...versions, {
+          version: currentVersion + 1,
+          savedAt: now,
+          savedBy,
+          note: versionNote,
+          // 新版本写入时的完整内容快照：历史版本比较与恢复评审都以此为准
+          snapshot: snapshotOf({ ...existing, ...fields })
+        }]
       }
       await db.docs.put(updated)
       result = { status: 'saved', doc: updated, autoMerged }

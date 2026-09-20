@@ -324,6 +324,7 @@ onMounted(async () => {
           <!-- 已解决：统一回填同一答案来源 -->
           <div v-if="row.primary.status === GAP.RESOLVED" class="answer-src" @click="docById[row.primary.docId] && router.push('/docs/' + row.primary.docId)">
             💡 答案来源：《{{ docById[row.primary.docId]?.title || '文档已删除' }}》
+            <span v-if="row.primary.sourceVersion" class="src-ver">v{{ row.primary.sourceVersion }}</span>
             <span v-if="docById[row.primary.docId]" class="go">查看文档 →</span>
           </div>
 
@@ -391,6 +392,7 @@ onMounted(async () => {
         <!-- 已解决：审批通过后自动回填的答案来源 -->
         <div v-if="t.ticket.status === GAP.RESOLVED" class="answer-src" @click="docById[t.ticket.docId] && router.push('/docs/' + t.ticket.docId)">
           💡 答案来源：《{{ docById[t.ticket.docId]?.title || '文档已删除' }}》
+          <span v-if="t.ticket.sourceVersion" class="src-ver">v{{ t.ticket.sourceVersion }}</span>
           <span v-if="docById[t.ticket.docId]" class="go">查看文档 →</span>
         </div>
 
@@ -495,6 +497,7 @@ onMounted(async () => {
 .resolved-at { font-size: 12px; color: var(--text-3); }
 .answer-src { margin-top: 12px; padding: 10px 14px; border-radius: 8px; background: #f0fdf4; border: 1px solid #bbf7d0; color: #15803d; font-size: 13px; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 8px; }
 .answer-src .go { margin-left: auto; font-size: 12px; }
+.answer-src .src-ver { font-size: 11px; color: #6d28d9; background: #ede9fe; border-radius: 999px; padding: 1px 8px; font-weight: 400; }
 .linked-doc { margin-top: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
 .lk-label { color: var(--text-3); }
 .lk-title { color: var(--primary); font-weight: 600; cursor: pointer; }

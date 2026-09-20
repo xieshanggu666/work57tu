@@ -195,6 +195,24 @@ const seedReview4 = {
   ]
 }
 
+// doc-2 已完成的版本恢复评审：v2 扩写有误，恢复 v1 内容并追加 v3
+const seedReview5 = {
+  id: 'rev-5', docId: 'doc-2', kind: 'restore', restoreFromVersion: 1, status: 'approved',
+  submittedBy: 'u-chen', submittedAt: ago(3 * d),
+  snapshot: {
+    title: 'Dexie 数据库操作指南',
+    body: '<h2>IndexedDB 太繁琐？试试 Dexie</h2><p>Dexie 用关系型 <b>表</b> 与 <i>索引</i> 来封装 IndexedDB，极大简化读写。</p><pre><code>await db.docs.add({ title: "示例", body: "<p>内容</p>" })</code></pre>',
+    categoryId: 'c-dev', tagIds: ['t-db', 't-guide'], visibility: 'public'
+  },
+  baseVersion: 2,
+  decidedBy: 'u-admin', decidedAt: ago(2 * d), decisionNote: '扩写章节有误，先恢复到初版，稍后重新补充。',
+  publishedVersion: 3,
+  timeline: [
+    { action: 'submit-restore', by: 'u-chen', at: ago(3 * d), note: '申请将文档恢复到历史版本 v1 的内容' },
+    { action: 'approve-restore', by: 'u-admin', at: ago(2 * d), note: '扩写章节有误，先恢复到初版，稍后重新补充。' }
+  ]
+}
+
 const seedGapTickets = [
   {
     id: 'gap-1',
@@ -251,6 +269,7 @@ const seedGapTickets = [
     createdBy: 'u-xiaoye', createdAt: ago(3 * d),
     claimedBy: 'u-chen', claimedAt: ago(2 * d + 2 * h),
     docId: 'doc-3', reviewId: 'rev-4', groupId: null, resolvedAt: ago(1 * d),
+    sourceVersion: 2,
     timeline: [
       { action: 'create', by: 'u-xiaoye', at: ago(3 * d), note: '' },
       { action: 'claim', by: 'u-chen', at: ago(2 * d + 2 * h), note: '' },
@@ -274,13 +293,52 @@ const seedRatings = [
 // - doc-1 评审中（锁定，正文为发起前旧版）
 // - doc-6 已通过（待审快照已回写，追加 v2 审批通过版本）
 // - doc-8 最近一次被驳回（内容不变，记录驳回结论）
+// 每个版本记录附带当时的内容快照（供版本比较与恢复评审使用）
+function snap(title, body, categoryId, tagIds, visibility) {
+  return { title, body, categoryId, tagIds: [...(tagIds || [])], visibility }
+}
 function withReviewFields(doc) {
   if (doc.id === 'doc-1') {
     return {
       ...doc,
       publishState: 'in_review',
       activeReviewId: 'rev-1',
-      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+      versions: [{
+        version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本',
+        snapshot: snap(doc.title, doc.body, doc.categoryId, doc.tagIds, doc.visibility)
+      }]
+    }
+  }
+  if (doc.id === 'doc-2') {
+    // 演示完整恢复链路：v2 扩写后经恢复评审回到 v1 内容并追加 v3（不回滚），旧记录带恢复边界
+    const v2At = ago(5 * d)
+    const v3At = ago(2 * d)
+    const v1Body = '<h2>IndexedDB 太繁琐？试试 Dexie</h2><p>Dexie 用关系型 <b>表</b> 与 <i>索引</i> 来封装 IndexedDB，极大简化读写。</p><pre><code>await db.docs.add({ title: "示例", body: "<p>内容</p>" })</code></pre>'
+    const v2Body = v1Body + '<h3>常用查询</h3><ul><li>按主键：<code>db.docs.get(id)</code></li><li>按索引过滤：<code>db.docs.where("categoryId").equals(id)</code></li><li>计数：<code>db.docs.count()</code></li></ul><blockquote>版本迁移使用 schemaVersion，新增字段时手动迁移即可。</blockquote>'
+    return {
+      ...doc,
+      body: v1Body,
+      updatedAt: v3At,
+      publishState: 'published',
+      activeReviewId: null,
+      lastReview: { reviewId: 'rev-5', status: 'approved', by: 'u-admin', at: v3At, note: '扩写章节有误，先恢复到初版，稍后重新补充。', version: 3, kind: 'restore' },
+      versions: [
+        {
+          version: 1, savedAt: ago(15 * d), savedBy: doc.ownerId, note: '初始版本',
+          snapshot: snap(doc.title, v1Body, doc.categoryId, doc.tagIds, doc.visibility),
+          restoredTo: [{ version: 3, at: v3At, reviewId: 'rev-5' }]
+        },
+        {
+          version: 2, savedAt: v2At, savedBy: doc.ownerId, note: '补充常用查询与迁移说明',
+          snapshot: snap(doc.title, v2Body, doc.categoryId, doc.tagIds, doc.visibility)
+        },
+        {
+          version: 3, savedAt: v3At, savedBy: doc.ownerId, note: '版本恢复：恢复自 v1：扩写章节有误，先恢复到初版，稍后重新补充。',
+          reviewStatus: 'approved', reviewId: 'rev-5', decidedBy: 'u-admin',
+          restoreFrom: 1, restoreReviewId: 'rev-5',
+          snapshot: snap(doc.title, v1Body, doc.categoryId, doc.tagIds, doc.visibility)
+        }
+      ]
     }
   }
   if (doc.id === 'doc-6') {
@@ -291,10 +349,18 @@ function withReviewFields(doc) {
       updatedAt: approvedAt,
       publishState: 'published',
       activeReviewId: null,
-      lastReview: { reviewId: 'rev-2', status: 'approved', by: 'u-admin', at: approvedAt, note: '复盘环节很有必要，通过。', version: 2 },
+      lastReview: { reviewId: 'rev-2', status: 'approved', by: 'u-admin', at: approvedAt, note: '复盘环节很有必要，通过。', version: 2, kind: 'edit' },
       versions: [
-        { version: 1, savedAt: ago(8 * 24 * h), savedBy: doc.ownerId, note: '初始版本' },
-        { version: 2, savedAt: approvedAt, savedBy: 'u-chen', note: '评审通过后发布：复盘环节很有必要，通过。', reviewStatus: 'approved', reviewId: 'rev-2', decidedBy: 'u-admin' }
+        {
+          version: 1, savedAt: ago(8 * 24 * h), savedBy: doc.ownerId, note: '初始版本',
+          snapshot: snap('线上故障排查手册',
+            '<h2>通用排查步骤</h2><ol><li>查看监控大盘与告警面板</li><li>拉取最近 15 分钟日志，定位错误堆栈</li><li>核对配置版本与灰度开关</li><li>依据 runbook 执行回滚或隔离</li></ol><blockquote>切勿在未知情的情况下直接改生产数据。</blockquote><p>若涉及 <b>密钥泄露</b> 请立即轮换并触发安全响应流程。</p>',
+            'c-ops', ['t-security', 't-faq'], 'team')
+        },
+        {
+          version: 2, savedAt: approvedAt, savedBy: 'u-chen', note: '评审通过后发布：复盘环节很有必要，通过。', reviewStatus: 'approved', reviewId: 'rev-2', decidedBy: 'u-admin',
+          snapshot: snap('线上故障排查手册', doc6ApprovedBody, 'c-ops', ['t-security', 't-faq'], 'team')
+        }
       ]
     }
   }
@@ -304,21 +370,28 @@ function withReviewFields(doc) {
       ...doc,
       publishState: 'published',
       activeReviewId: null,
-      lastReview: { reviewId: 'rev-3', status: 'rejected', by: 'u-admin', at: rejectedAt, note: '可见性从团队改为私有范围过大，且强制改密周期需与运维确认，暂不通过。' },
-      versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+      lastReview: { reviewId: 'rev-3', status: 'rejected', by: 'u-admin', at: rejectedAt, note: '可见性从团队改为私有范围过大，且强制改密周期需与运维确认，暂不通过。', kind: 'edit' },
+      versions: [{
+        version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本',
+        snapshot: snap(doc.title, doc.body, doc.categoryId, doc.tagIds, doc.visibility)
+      }]
     }
   }
   return {
     ...doc,
     publishState: 'published',
     activeReviewId: null,
-    versions: [{ version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本' }]
+    versions: [{
+      version: 1, savedAt: doc.updatedAt, savedBy: doc.ownerId, note: '初始版本',
+      snapshot: snap(doc.title, doc.body, doc.categoryId, doc.tagIds, doc.visibility)
+    }]
   }
 }
 
 // 种子版本：v1 基础数据；v2 缺口工单演示数据（含 rev-4 评审留痕与 doc-3 审批回写）；
-// v3 文档访问申请演示数据（doc-9 保密文档上的限时阅读/协作授权、撤销与到期留痕）
-const SEED_VER = '3'
+// v3 文档访问申请演示数据（doc-9 保密文档上的限时阅读/协作授权、撤销与到期留痕）；
+// v4 版本内容快照与恢复评审（版本记录附带 snapshot，支持版本比较与恢复）
+const SEED_VER = '4'
 
 async function isSeeded() {
   return (await getMeta('seeded')) === SEED_VER
@@ -341,8 +414,13 @@ async function ensureGapSeed() {
     await db.docs.put({
       ...doc3,
       updatedAt: decidedAt,
-      lastReview: { reviewId: 'rev-4', status: 'approved', by: 'u-admin', at: decidedAt, note: '内容已覆盖权限申请流程，通过。', version: versions.length + 1 },
-      versions: [...versions, { version: versions.length + 1, savedAt: decidedAt, savedBy: 'u-chen', note: '评审通过后发布：内容已覆盖权限申请流程，通过。', reviewStatus: 'approved', reviewId: 'rev-4', decidedBy: 'u-admin' }]
+      lastReview: { reviewId: 'rev-4', status: 'approved', by: 'u-admin', at: decidedAt, note: '内容已覆盖权限申请流程，通过。', version: versions.length + 1, kind: 'edit' },
+      versions: [...versions.map((v) =>
+        v.snapshot ? v : { ...v, snapshot: { title: doc3.title, body: doc3.body, categoryId: doc3.categoryId, tagIds: [...(doc3.tagIds || [])], visibility: doc3.visibility } }
+      ), {
+        version: versions.length + 1, savedAt: decidedAt, savedBy: 'u-chen', note: '评审通过后发布：内容已覆盖权限申请流程，通过。', reviewStatus: 'approved', reviewId: 'rev-4', decidedBy: 'u-admin',
+        snapshot: { title: doc3.title, body: doc3.body, categoryId: doc3.categoryId, tagIds: [...(doc3.tagIds || [])], visibility: doc3.visibility }
+      }]
     })
   }
   await db.gapTickets.bulkAdd(seedGapTickets)
@@ -455,6 +533,7 @@ export async function ensureSeeded() {
       await db.favorites.bulkAdd(seedFavorites)
       await db.ratings.bulkAdd(seedRatings)
       await db.reviews.bulkAdd(seedReviews)
+      if (!(await db.reviews.get('rev-5'))) await db.reviews.add(seedReview5)
     }
     await ensureGapSeed()
     await ensureAccessSeed()

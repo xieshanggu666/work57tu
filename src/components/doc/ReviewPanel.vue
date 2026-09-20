@@ -7,8 +7,9 @@ import MemberSelect from '@/components/common/MemberSelect.vue'
 import { formatDate, formatFull, avatarColor } from '@/utils/format'
 import {
   REVIEW, reviewStatusLabel, canWithdrawReview, canReviewDecision,
-  canCommentReview, timelineActionLabel
+  canCommentReview, timelineActionLabel, isRestoreReview, reviewKindLabel, reviewBaseVersionLabel
 } from '@/utils/review'
+import { fieldLabels } from '@/utils/version'
 
 const props = defineProps({
   doc: { type: Object, required: true }
@@ -24,6 +25,8 @@ const noteText = ref('')
 const decisionOpen = ref(false)
 const busy = ref(false)
 const justDecided = ref('')
+// 审批时发现评审期间存在并发直接保存（版本漂移）：待管理员确认冲突处理方式
+const driftConflict = ref(null)
 
 // 展开的历史评审单 id（最新一条默认展开）
 const expanded = ref({})
@@ -73,16 +76,23 @@ async function postComment() {
 }
 function onMention(id) { if (!commentMentions.value.includes(id)) commentMentions.value.push(id) }
 
-async function decide(decision) {
+async function decide(decision, force = false) {
   if (!pending.value || busy.value) return
   busy.value = true
   try {
-    const res = await reviewStore.decideReview(pending.value.id, decision, noteText.value.trim(), auth.user)
+    const res = await reviewStore.decideReview(pending.value.id, decision, noteText.value.trim(), auth.user, { force })
     if (res.status === 'ok') {
-      justDecided.value = decision === 'approve' ? '已通过，待审内容已发布' : '已驳回，文档保持原内容'
+      justDecided.value = decision === 'approve'
+        ? (res.restored ? '已通过，已发布恢复版本 v' + res.publishedVersion : '已通过，待审内容已发布')
+        : '已驳回，文档保持原内容'
       decisionOpen.value = false
+      driftConflict.value = null
       noteText.value = ''
       setTimeout(() => { justDecided.value = '' }, 3000)
+    } else if (res.status === 'drift-conflict') {
+      // 评审期间文档被直接保存过：展示冲突字段，管理员可自动合并其余字段后选择以待审内容覆盖冲突
+      driftConflict.value = res
+      decisionOpen.value = false
     } else {
       alert('操作失败：评审单状态已变化，请刷新后重试')
     }
@@ -105,6 +115,7 @@ async function withdraw() {
 const canDecide = computed(() => canReviewDecision(auth.user?.role, pending.value))
 const canWithdraw = computed(() => canWithdrawReview(pending.value, auth.user?.id))
 const canComment = computed(() => canCommentReview(auth.user?.role, pending.value, auth.user?.id))
+const pendingIsRestore = computed(() => isRestoreReview(pending.value))
 
 function statusCls(r) {
   return { [REVIEW.PENDING]: 'st-pending', [REVIEW.APPROVED]: 'st-ok', [REVIEW.REJECTED]: 'st-no', [REVIEW.WITHDRAWN]: 'st-off' }[r.status]
@@ -117,6 +128,9 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
   <div class="review card">
     <div class="rv-head">
       <span class="rv-title">🧾 知识评审</span>
+      <span v-if="pending" class="kind-tag" :class="{ restore: pendingIsRestore }">
+        {{ reviewKindLabel(pending) }}
+      </span>
       <span v-if="pending" class="st st-pending">⏳ 待管理员审批</span>
       <span v-else-if="doc.lastReview" class="st" :class="statusCls({ status: doc.lastReview.status })">
         最近审批：{{ reviewStatusLabel(doc.lastReview.status) }}
@@ -130,12 +144,28 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
 
     <!-- 流转中的评审单 -->
     <div v-if="pending" class="rv-body">
+      <div v-if="pendingIsRestore" class="restore-tip">
+        ↩ 本次为<b>版本恢复</b>：审批通过后将追加一个内容等于 v{{ pending.restoreFromVersion }} 的新版本（不删除后续版本），并同步更新引用本文档的问答答案来源。
+      </div>
       <div class="rv-meta">
         <span class="who"><span class="ava" :style="{ background: avatarColor(pending.submittedBy) }">{{ userById[pending.submittedBy]?.avatar || '?' }}</span>
           {{ userById[pending.submittedBy]?.name || pending.submittedBy }} 发起评审
         </span>
         <span class="tm">{{ formatFull(pending.submittedAt) }}</span>
-        <span class="ver">基于 v{{ pending.baseVersion }}</span>
+        <span class="ver">{{ reviewBaseVersionLabel(pending) }}</span>
+      </div>
+
+      <!-- 审批时检测到评审期间的并发直接保存：冲突字段需管理员决策 -->
+      <div v-if="driftConflict" class="drift-bar">
+        <div class="drift-head">⚠️ 评审期间文档被修改并保存过（版本已更新）</div>
+        <div class="drift-desc">
+          冲突字段：<b>{{ fieldLabels(driftConflict.conflictFields).join('、') }}</b>
+          <template v-if="driftConflict.autoMerged?.length">；其余字段将自动合并：{{ fieldLabels(driftConflict.autoMerged).join('、') }}</template>。
+        </div>
+        <div class="decision-actions">
+          <button class="btn sm ok-solid" :disabled="busy" @click="decide('approve', true)">以待审内容覆盖冲突并发布</button>
+          <button class="btn sm ghost" :disabled="busy" @click="driftConflict = null; decisionOpen = true">返回再想想</button>
+        </div>
       </div>
 
       <div v-if="diffs.length" class="diff-line">
@@ -166,7 +196,9 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
           <textarea v-model="noteText" rows="2" placeholder="审批意见（可选，将留痕并同步到评论区时间线）"></textarea>
           <div class="decision-actions">
             <button class="btn sm" :disabled="busy" @click="decide('reject')">✕ 驳回（内容不变）</button>
-            <button class="btn sm ok-solid" :disabled="busy" @click="decide('approve')">✓ 通过并发布</button>
+            <button class="btn sm ok-solid" :disabled="busy" @click="decide('approve')">
+              ✓ {{ pendingIsRestore ? '通过并发布恢复版本' : '通过并发布' }}
+            </button>
             <button class="btn sm ghost" @click="decisionOpen = false">取消</button>
           </div>
         </template>
@@ -192,6 +224,7 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
       <div v-if="shownFirst && !pending" class="h-item">
         <div class="h-head" @click="toggle(shownFirst.id)">
           <span class="st sm" :class="statusCls(shownFirst)">{{ reviewStatusLabel(shownFirst.status) }}</span>
+          <span v-if="isRestoreReview(shownFirst)" class="kind-sm restore">版本恢复</span>
           <span class="h-who">{{ userById[shownFirst.submittedBy]?.name }}</span>
           <span class="h-tm">{{ formatDate(shownFirst.submittedAt) }}</span>
           <span class="h-arrow">{{ isExpanded(shownFirst.id) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -208,6 +241,7 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
       <div v-for="r in history" :key="r.id" class="h-item">
         <div class="h-head" @click="toggle(r.id)">
           <span class="st sm" :class="statusCls(r)">{{ reviewStatusLabel(r.status) }}</span>
+          <span v-if="isRestoreReview(r)" class="kind-sm restore">版本恢复</span>
           <span class="h-who">{{ userById[r.submittedBy]?.name }}</span>
           <span class="h-tm">{{ formatDate(r.submittedAt) }}</span>
           <span class="h-arrow">{{ isExpanded(r.id) ? '收起 ▲' : '展开 ▼' }}</span>
@@ -236,6 +270,14 @@ watch(pending, (p) => { if (!p) decisionOpen.value = false })
 .st-ok { background: #dcfce7; color: #15803d; }
 .st-no { background: #fee2e2; color: #b91c1c; }
 .st-off { background: var(--panel-2); color: var(--text-3); }
+.kind-tag { font-size: 11px; padding: 1px 9px; border-radius: 999px; background: var(--panel-2); color: var(--text-3); }
+.kind-tag.restore, .kind-sm.restore { background: #ede9fe; color: #6d28d9; }
+.kind-sm { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); color: var(--text-3); }
+.restore-tip { margin-top: 10px; font-size: 12px; color: #6d28d9; background: #faf5ff; border: 1px solid #ddd6fe; border-radius: 8px; padding: 8px 12px; }
+.drift-bar { margin-top: 10px; border: 1px solid #f59e0b; background: #fffbeb; border-radius: 8px; padding: 10px 12px; }
+.drift-head { font-weight: 600; color: #b45309; font-size: 13px; margin-bottom: 6px; }
+.drift-desc { font-size: 12px; color: var(--text-2); margin-bottom: 8px; }
+.drift-bar .decision-actions { margin-top: 2px; }
 .toast-line { color: #15803d; font-size: 13px; margin-bottom: 10px; }
 .rv-meta { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); flex-wrap: wrap; }
 .who { display: inline-flex; align-items: center; gap: 6px; }
